@@ -21,68 +21,181 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <string.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
+#include "ADXL335.h"
 #include "led.h"
 #include "neopixel_stripe.h"
 #include "ble_mcu.h"
+#include "uart_mcu.h"  
+#include "led.h"
+#include <math.h>
+/*==================[macros and definitions]=================================*/
+/*==================[inclusions]=============================================*/
+// ...existing code...
+
 /*==================[macros and definitions]=================================*/
 #define CONFIG_BLINK_PERIOD 500
 #define LED_BT	LED_1
-/*==================[internal data definition]===============================*/
 
-/*==================[internal functions declaration]=========================*/
-/**
- * @brief Función a ejecutarse ante un interrupción de recepción 
- * a través de la conexión BLE.
- * 
- * @param data      Puntero a array de datos recibidos
- * @param length    Longitud del array de datos recibidos
- */
-void read_data(uint8_t * data, uint8_t length){
-	uint8_t i = 1;
-    static uint8_t red = 0, green = 0, blue = 0;
-	char msg[30];
+// Configuración detector de caídas
+#define FALL_THRESH_HIGH    2.5f   
+#define FALL_THRESH_LOW    -1.5f    
+#define FALL_TIME_WINDOW   1000    
+#define MIN_PEAKS          4       
 
-	if(data[0] == 'R'){
-        /* El slidebar Rojo envía los datos con el formato "R" + value + "A" */
-		red = 0;
-		while(data[i] != 'A'){
-            /* Convertir el valor ASCII a un valor entero */
-			red = red * 10;
-			red = red + (data[i] - '0');
-			i++;
-		}
-	}else if(data[0] == 'G'){   
-        /* El slidebar Verde envía los datos con el formato "G" + value + "A" */
-		green = 0;
-		while(data[i] != 'A'){
-            /* Convertir el valor ASCII a un valor entero */
-			green = green * 10;
-			green = green + (data[i] - '0');
-			i++;
-		}
-	}else if(data[0] == 'B'){
-        /* El slidebar Azul envía los datos con el formato "B" + value + "A" */
-		blue = 0;
-		while(data[i] != 'A'){
-            /* Convertir el valor ASCII a un valor entero */
-			blue = blue * 10;
-			blue = blue + (data[i] - '0');
-			i++;
-		}
-	}
-    NeoPixelAllColor(NeoPixelRgb2Color(red, green, blue));
-    /* Se envía una realimentación de los valores actuales de brillo del LED */
-    sprintf(msg, "R: %d, G: %d, B: %d\n", red, green, blue);
-    BleSendString(msg);
+/*==================[internal data declaration]==============================*/
+typedef struct {
+    float peaks[MIN_PEAKS];        
+    uint32_t peak_times[MIN_PEAKS]; 
+    uint8_t peak_count;            
+    uint32_t last_peak_time;       
+    float last_accel;              
+} fall_detector_t;
+
+static fall_detector_t fall_detector = {0};
+static volatile bool led_alert_active = false;
+/* duración de la alerta en ms */
+#define LED_ALERT_DURATION_MS 3000
+/*==================[internal functions definition]==========================*/
+void enviar_uart_ADXL335() {
+    float accel_x, accel_y, accel_z;
+    
+    accel_x = ReadXValue();
+    accel_y = ReadYValue();
+    accel_z = ReadZValue();
+    
+    float accel_mag = sqrtf(accel_x*accel_x + accel_y*accel_y + accel_z*accel_z);
+    char buffer[64];
+    sprintf(buffer, "%.3f,%.3f,%.3f,%.3f\r\n", 
+             accel_x, accel_y, accel_z, accel_mag);
+    UartSendString(UART_PC, buffer);
 }
 
-/*==================[external functions definition]==========================*/
-void app_main(void){
-    static neopixel_color_t color;
+void inicializar_sistema_ADXL335() {
+    serial_config_t cfg;
+    cfg.baud_rate = 230400;
+    cfg.port = UART_PC;
+    cfg.func_p = UART_NO_INT;
+    cfg.param_p = NULL;
+    UartInit(&cfg);
+    
+    if (ADXL335Init()) {
+        UartSendString(UART_PC, "ADXL335 inicializado OK\n");
+    } else {
+        UartSendString(UART_PC, "ERROR: ADXL335 no responde\n");
+    }
+}
+
+// ...existing code...
+
+static bool detect_fall(float current_accel) {
+    uint32_t current_time = pdTICKS_TO_MS(xTaskGetTickCount());
+    bool fall_detected = false;
+
+    // Detectar cruce por umbrales (picos)
+    if ((fall_detector.last_accel <= FALL_THRESH_HIGH && current_accel > FALL_THRESH_HIGH) ||
+        (fall_detector.last_accel >= FALL_THRESH_LOW && current_accel < FALL_THRESH_LOW)) {
+        
+        // Guardar pico en el buffer circular
+        uint8_t idx = fall_detector.peak_count % MIN_PEAKS;
+        fall_detector.peaks[idx] = current_accel;
+        fall_detector.peak_times[idx] = current_time;
+        fall_detector.peak_count++;
+        fall_detector.last_peak_time = current_time;
+
+        // Verificar si tenemos suficientes picos en la ventana de tiempo
+        if (fall_detector.peak_count >= MIN_PEAKS) {
+            uint32_t oldest_peak_time = fall_detector.peak_times[(fall_detector.peak_count - MIN_PEAKS) % MIN_PEAKS];
+            
+            // Si los picos ocurrieron dentro de la ventana, detectamos caída
+            if ((current_time - oldest_peak_time) <= FALL_TIME_WINDOW) {
+                fall_detected = true;
+                // Resetear detector después de caída
+                fall_detector.peak_count = 0;
+            }
+        }
+    }
+
+    // Limpiar picos viejos fuera de la ventana
+    if ((current_time - fall_detector.last_peak_time) > FALL_TIME_WINDOW) {
+        fall_detector.peak_count = 0;
+    }
+
+    fall_detector.last_accel = current_accel;
+    return fall_detected;
+}
+
+// ...existing code...
+
+static void visualizer_task(void *pvParameters)
+{
+    const TickType_t sample_period = pdMS_TO_TICKS(50);  // 20Hz para visualización
+    
+    vTaskDelay(pdMS_TO_TICKS(20));
+
+    for (;;)
+    {
+        enviar_uart_ADXL335();  // envia datos para graficar
+        vTaskDelay(sample_period);
+    }
+}
+static void led_alert_task(void *pvParameters)
+{
+    (void)pvParameters;
+
+    /* encender los 3 leds: mask b0:LED_3, b1:LED_2, b2:LED_1 -> 0x07 */
+    LedsMask( (1 << 0) | (1 << 1) | (1 << 2) );
+
+    vTaskDelay(pdMS_TO_TICKS(LED_ALERT_DURATION_MS));
+
+    LedsOffAll();
+
+    led_alert_active = false;
+    vTaskDelete(NULL);
+}
+
+static void fall_detector_task(void *pvParameters)
+{
+    const TickType_t sample_period = pdMS_TO_TICKS(20);  // 50Hz para detección
+    
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    while(1) {
+        float ax = ReadXValue();
+        float ay = ReadYValue();
+        float az = ReadZValue();
+        
+        float accel_mag = sqrtf(ax*ax + ay*ay + az*az);
+
+        if (detect_fall(accel_mag)) {
+            UartSendString(UART_PC, "¡CAÍDA DETECTADA!\r\n");
+            // TODO: Acciones al detectar caída (LED, buzzer, etc)
+        }
+         if (!led_alert_active) {
+                led_alert_active = true;
+                xTaskCreate(led_alert_task, "led_alert", 2048, NULL, 5, NULL);
+            }
+
+
+        vTaskDelay(sample_period);
+    }
+}
+
+void read_data(uint8_t * data, uint8_t length) {
+    // ...existing code... (mantener igual la función read_data)
+}
+
+void app_main(void)
+{
+    inicializar_sistema_ADXL335();
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Crear ambas tareas con diferentes prioridades
+    xTaskCreate(visualizer_task, "visualizer", 4096, NULL, 1, NULL);  // Menor prioridad
+    //xTaskCreate(fall_detector_task, "fall_detect", 4096, NULL, 2, NULL);  // Mayor prioridad
+
+    // Configuración BLE y LED RGB (del código original)
     ble_config_t ble_configuration = {
         "ESP_EDU_1",
         read_data
@@ -90,23 +203,6 @@ void app_main(void){
 
     LedsInit();
     BleInit(&ble_configuration);
-    /* Se inicializa el LED RGB de la placa */
-    NeoPixelInit(BUILT_IN_RGB_LED_PIN, BUILT_IN_RGB_LED_LENGTH, &color);
+    NeoPixelInit(BUILT_IN_RGB_LED_PIN, BUILT_IN_RGB_LED_LENGTH, NULL);
     NeoPixelAllOff();
-    while(1){
-        vTaskDelay(CONFIG_BLINK_PERIOD / portTICK_PERIOD_MS);
-        switch(BleStatus()){
-            case BLE_OFF:
-                LedOff(LED_BT);
-            break;
-            case BLE_DISCONNECTED:
-                LedToggle(LED_BT);
-            break;
-            case BLE_CONNECTED:
-                LedOn(LED_BT);
-            break;
-        }
-    }
 }
-
-/*==================[end of file]============================================*/
