@@ -34,7 +34,11 @@
             "path": "examples/ej_mfrc522"
         },
         {
+<<<<<<< HEAD
             "path": "bastoneras"
+=======
+            "path": "x_template"
+>>>>>>> ff0c2c74d96fb1717bc3e7850f2c0e94b678849d
         }
     ],
     "settings": {
