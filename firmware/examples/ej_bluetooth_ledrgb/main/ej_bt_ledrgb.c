@@ -66,6 +66,11 @@ void enviar_uart_ADXL335() {
     accel_z = ReadZValue();
     
     float accel_mag = sqrtf(accel_x*accel_x + accel_y*accel_y + accel_z*accel_z);
+
+    if (accel_mag > 25 || accel_mag < 5) {
+        xTaskNotifyGive(fall_detector_task);
+    }
+    
     char buffer[64];
     sprintf(buffer, "%.3f,%.3f,%.3f,%.3f\r\n", 
              accel_x, accel_y, accel_z, accel_mag);
@@ -87,46 +92,6 @@ void inicializar_sistema_ADXL335() {
     }
 }
 
-// ...existing code...
-
-static bool detect_fall(float current_accel) {
-    uint32_t current_time = pdTICKS_TO_MS(xTaskGetTickCount());
-    bool fall_detected = false;
-
-    // Detectar cruce por umbrales (picos)
-    if ((fall_detector.last_accel <= FALL_THRESH_HIGH && current_accel > FALL_THRESH_HIGH) ||
-        (fall_detector.last_accel >= FALL_THRESH_LOW && current_accel < FALL_THRESH_LOW)) {
-        
-        // Guardar pico en el buffer circular
-        uint8_t idx = fall_detector.peak_count % MIN_PEAKS;
-        fall_detector.peaks[idx] = current_accel;
-        fall_detector.peak_times[idx] = current_time;
-        fall_detector.peak_count++;
-        fall_detector.last_peak_time = current_time;
-
-        // Verificar si tenemos suficientes picos en la ventana de tiempo
-        if (fall_detector.peak_count >= MIN_PEAKS) {
-            uint32_t oldest_peak_time = fall_detector.peak_times[(fall_detector.peak_count - MIN_PEAKS) % MIN_PEAKS];
-            
-            // Si los picos ocurrieron dentro de la ventana, detectamos caída
-            if ((current_time - oldest_peak_time) <= FALL_TIME_WINDOW) {
-                fall_detected = true;
-                // Resetear detector después de caída
-                fall_detector.peak_count = 0;
-            }
-        }
-    }
-
-    // Limpiar picos viejos fuera de la ventana
-    if ((current_time - fall_detector.last_peak_time) > FALL_TIME_WINDOW) {
-        fall_detector.peak_count = 0;
-    }
-
-    fall_detector.last_accel = current_accel;
-    return fall_detected;
-}
-
-// ...existing code...
 
 static void visualizer_task(void *pvParameters)
 {
@@ -157,30 +122,16 @@ static void led_alert_task(void *pvParameters)
 
 static void fall_detector_task(void *pvParameters)
 {
-    const TickType_t sample_period = pdMS_TO_TICKS(20);  // 50Hz para detección
-    
-    vTaskDelay(pdMS_TO_TICKS(10));
-
-    while(1) {
-        float ax = ReadXValue();
-        float ay = ReadYValue();
-        float az = ReadZValue();
-        
-        float accel_mag = sqrtf(ax*ax + ay*ay + az*az);
-
-        if (detect_fall(accel_mag)) {
-            UartSendString(UART_PC, "¡CAÍDA DETECTADA!\r\n");
-            // TODO: Acciones al detectar caída (LED, buzzer, etc)
-        }
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        UartSendString(UART_PC, "¡CAÍDA DETECTADA!\r\n");
+        // TODO: Acciones al detectar caída (LED, buzzer, etc)
+      
          if (!led_alert_active) {
                 led_alert_active = true;
                 xTaskCreate(led_alert_task, "led_alert", 2048, NULL, 5, NULL);
             }
-
-
-        vTaskDelay(sample_period);
     }
-}
+
 
 void read_data(uint8_t * data, uint8_t length) {
     // ...existing code... (mantener igual la función read_data)
@@ -193,7 +144,7 @@ void app_main(void)
 
     // Crear ambas tareas con diferentes prioridades
     xTaskCreate(visualizer_task, "visualizer", 4096, NULL, 1, NULL);  // Menor prioridad
-    //xTaskCreate(fall_detector_task, "fall_detect", 4096, NULL, 2, NULL);  // Mayor prioridad
+    xTaskCreate(fall_detector_task, "fall_detect", 4096, NULL, 2, &fall_detector_task);  // Mayor prioridad
 
     // Configuración BLE y LED RGB (del código original)
     ble_config_t ble_configuration = {
