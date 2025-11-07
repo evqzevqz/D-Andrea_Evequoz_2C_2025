@@ -45,15 +45,17 @@
 #define MIN_PEAKS          4       
 
 /*==================[internal data declaration]==============================*/
-typedef struct {
-    float peaks[MIN_PEAKS];        
-    uint32_t peak_times[MIN_PEAKS]; 
-    uint8_t peak_count;            
-    uint32_t last_peak_time;       
-    float last_accel;              
-} fall_detector_t;
+// typedef struct {
+//     float peaks[MIN_PEAKS];        
+//     uint32_t peak_times[MIN_PEAKS]; 
+//     uint8_t peak_count;            
+//     uint32_t last_peak_time;       
+//     float last_accel;              
+// } fall_detector_t;
 
-static fall_detector_t fall_detector = {0};
+TaskHandle_t fall_detector_task = NULL;
+
+
 static volatile bool led_alert_active = false;
 /* duración de la alerta en ms */
 #define LED_ALERT_DURATION_MS 3000
@@ -120,7 +122,7 @@ static void led_alert_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-static void fall_detector_task(void *pvParameters)
+static void caida_detector_task(void *pvParameters)
 {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         UartSendString(UART_PC, "¡CAÍDA DETECTADA!\r\n");
@@ -144,7 +146,7 @@ void app_main(void)
 
     // Crear ambas tareas con diferentes prioridades
     xTaskCreate(visualizer_task, "visualizer", 4096, NULL, 1, NULL);  // Menor prioridad
-    xTaskCreate(fall_detector_task, "fall_detect", 4096, NULL, 2, &fall_detector_task);  // Mayor prioridad
+    xTaskCreate(caida_detector_task, "fall_detect", 4096, NULL, 2, &fall_detector_task);  // Mayor prioridad
 
     // Configuración BLE y LED RGB (del código original)
     ble_config_t ble_configuration = {
