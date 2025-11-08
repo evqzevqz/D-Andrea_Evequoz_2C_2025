@@ -30,6 +30,7 @@
 #include "uart_mcu.h"  
 #include "led.h"
 #include <math.h>
+#include "gpio_mcu.h"
 /*==================[macros and definitions]=================================*/
 /*==================[inclusions]=============================================*/
 // ...existing code...
@@ -62,6 +63,7 @@ static volatile bool led_alert_active = false;
 /*==================[internal functions definition]==========================*/
 void enviar_uart_ADXL335() {
     float accel_x, accel_y, accel_z;
+   
     
     accel_x = ReadXValue();
     accel_y = ReadYValue();
@@ -97,7 +99,7 @@ void inicializar_sistema_ADXL335() {
 
 static void visualizer_task(void *pvParameters)
 {
-    const TickType_t sample_period = pdMS_TO_TICKS(50);  // 20Hz para visualización
+    const TickType_t sample_period = pdMS_TO_TICKS(100);  // 20Hz para visualización
     
     vTaskDelay(pdMS_TO_TICKS(20));
 
@@ -109,23 +111,33 @@ static void visualizer_task(void *pvParameters)
 }
 static void led_alert_task(void *pvParameters)
 {
+    while (1)
+    {
+        /* encender los 3 leds: mask b0:LED_3, b1:LED_2, b2:LED_1 -> 0x07 */
+        LedsMask( (1 << 0) | (1 << 1) | (1 << 2) );
+        GPIOOn(GPIO_19);
+        vTaskDelay(pdMS_TO_TICKS(LED_ALERT_DURATION_MS));
+
+        LedsOffAll();
+        GPIOOff(GPIO_19);
+        led_alert_active = false;
+        vTaskDelete(NULL);
+        
+        
+    }
+    
     (void)pvParameters;
 
-    /* encender los 3 leds: mask b0:LED_3, b1:LED_2, b2:LED_1 -> 0x07 */
-    LedsMask( (1 << 0) | (1 << 1) | (1 << 2) );
 
-    vTaskDelay(pdMS_TO_TICKS(LED_ALERT_DURATION_MS));
-
-    LedsOffAll();
-
-    led_alert_active = false;
-    vTaskDelete(NULL);
 }
 
 static void caida_detector_task(void *pvParameters)
 {
+    while (1)
+    {
         ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
         UartSendString(UART_PC, "¡CAÍDA DETECTADA!\r\n");
+        BleSendString("¡CAÍDA DETECTADA!\r\n");
         // TODO: Acciones al detectar caída (LED, buzzer, etc)
       
          if (!led_alert_active) {
@@ -133,16 +145,19 @@ static void caida_detector_task(void *pvParameters)
                 xTaskCreate(led_alert_task, "led_alert", 2048, NULL, 5, NULL);
             }
     }
+    
+        
+    }
 
 
 void read_data(uint8_t * data, uint8_t length) {
-    // ...existing code... (mantener igual la función read_data)
 }
 
 void app_main(void)
 {
     inicializar_sistema_ADXL335();
     vTaskDelay(pdMS_TO_TICKS(50));
+    GPIOInit(GPIO_19,GPIO_OUTPUT);
 
     // Crear ambas tareas con diferentes prioridades
     xTaskCreate(visualizer_task, "visualizer", 4096, NULL, 1, NULL);  // Menor prioridad
@@ -150,12 +165,11 @@ void app_main(void)
 
     // Configuración BLE y LED RGB (del código original)
     ble_config_t ble_configuration = {
-        "ESP_EDU_1",
-        read_data
+        .device_name= "bastoneras",
+        .func_p= read_data,
     };
 
     LedsInit();
     BleInit(&ble_configuration);
-    NeoPixelInit(BUILT_IN_RGB_LED_PIN, BUILT_IN_RGB_LED_LENGTH, NULL);
-    NeoPixelAllOff();
+
 }
